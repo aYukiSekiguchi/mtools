@@ -4,6 +4,13 @@ mtools
 
 |PyPI version| |Build Status| |Python 36| |Python 37| |Python 38|
 
+About This Fork
+---------------
+
+This is a fork of mtools v1.6.4, intended to support ``mlogvis`` for MongoDB 4.4+.
+
+----
+
 **mtools** is a collection of helper scripts to parse, filter, and visualize
 MongoDB log files (``mongod``, ``mongos``). mtools also includes ``mlaunch``, a
 utility to quickly set up complex MongoDB test environments on a local machine,
