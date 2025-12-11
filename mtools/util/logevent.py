@@ -1361,21 +1361,69 @@ class LogEvent(object):
                     self._sort_pattern = json2pattern(json.dumps(sort_doc), debug=self._debug)
                     self._actual_sort = json.dumps(sort_doc)
 
-        # Build a line_str representation for display purposes
-        payload = ''
+        # Build a line_str representation matching text log format
+        # Format: timestamp LEVEL COMPONENT [thread] operation namespace command: {...} planSummary: ... keysExamined:N docsExamined:N ... Nms
+        parts = []
+
+        # Level and component
+        level = self._level or 'I'
+        component = self._component or 'COMMAND'
+        parts.append('%s %s' % (level, component))
+
+        # Thread
+        parts.append('[%s]' % (self._thread or ''))
+
+        # Operation and namespace
+        parts.append(self._operation or '')
+        parts.append(self._namespace or '')
+
+        # Command payload
         if 'command' in attr:
-            payload = 'command: %s' % json.dumps(attr['command'], ensure_ascii=False)
+            parts.append('command: %s' % json.dumps(attr['command'], ensure_ascii=False))
 
-        scanned = 'keysExamined:%i' % self._nscanned if self._nscanned is not None else ''
-        yields = 'numYields:%i' % self._numYields if self._numYields is not None else ''
-        duration = '%ims' % self._duration if self._duration is not None else ''
-        locks_str = self._locks if self._locks else ''
+        # Plan summary
+        if self._planSummary:
+            parts.append('planSummary: %s' % self._planSummary)
 
-        self._line_str = ("[{thread}] {operation} {namespace} {payload} "
-                          "{scanned} {yields} locks {locks} "
-                          "{duration}".format(thread=self._thread or '',
-                                              operation=self._operation or '',
-                                              namespace=self._namespace or '',
-                                              payload=payload, scanned=scanned,
-                                              yields=yields, locks=locks_str,
-                                              duration=duration))
+        # Counters
+        if self._nscanned is not None:
+            parts.append('keysExamined:%i' % self._nscanned)
+        if self._nscannedObjects is not None:
+            parts.append('docsExamined:%i' % self._nscannedObjects)
+        if attr.get('cursorExhausted'):
+            parts.append('cursorExhausted:1')
+        if self._numYields is not None:
+            parts.append('numYields:%i' % self._numYields)
+        if self._nreturned is not None:
+            parts.append('nreturned:%i' % self._nreturned)
+
+        # Query hash and plan cache key
+        if attr.get('queryHash'):
+            parts.append('queryHash:%s' % attr['queryHash'])
+        if attr.get('planCacheKey'):
+            parts.append('planCacheKey:%s' % attr['planCacheKey'])
+
+        # Response length
+        if attr.get('reslen'):
+            parts.append('reslen:%i' % attr['reslen'])
+
+        # Locks
+        if self._locks:
+            parts.append('locks:%s' % self._locks)
+
+        # Storage
+        storage = attr.get('storage', {})
+        if storage:
+            parts.append('storage:%s' % json.dumps(storage, ensure_ascii=False))
+        else:
+            parts.append('storage:{}')
+
+        # Protocol
+        if attr.get('protocol'):
+            parts.append('protocol:%s' % attr['protocol'])
+
+        # Duration
+        if self._duration is not None:
+            parts.append('%ims' % self._duration)
+
+        self._line_str = ' '.join(parts)
