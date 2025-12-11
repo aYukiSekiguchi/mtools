@@ -264,6 +264,10 @@ class LogFile(InputSource):
         line = line.rstrip('\n')
         le = LogEvent(line)
 
+        # JSON logs are parsed directly, no need for datetime hints
+        if hasattr(le, '_json_log') and le._json_log:
+            return le
+
         # hint format and nextpos from previous line
         if self._datetime_format and self._datetime_nextpos is not None:
             ret = le.set_datetime_hint(self._datetime_format,
@@ -482,7 +486,12 @@ class LogFile(InputSource):
                 self._start = logevent.datetime
                 self._timezone = logevent.datetime.tzinfo
                 self._datetime_format = logevent.datetime_format
-                self._datetime_nextpos = logevent._datetime_nextpos
+                # For JSON logs, _datetime_nextpos may be None since we don't
+                # tokenize in the same way. Set to a safe default.
+                if hasattr(logevent, '_json_log') and logevent._json_log:
+                    self._datetime_nextpos = None
+                else:
+                    self._datetime_nextpos = logevent._datetime_nextpos
                 break
             if lines_checked > max_start_lines:
                 break

@@ -67,14 +67,30 @@ class LogEvent(object):
 
         if isinstance(doc_or_str, str) or (sys.version_info.major == 2 and
                                            isinstance(doc_or_str, unicode)):
+            # Check if this is a JSON log line
+            stripped = doc_or_str.strip()
+            if stripped.startswith('{') and stripped.endswith('}'):
+                try:
+                    json_doc = json.loads(stripped)
+                    # Check if this looks like a MongoDB JSON log entry
+                    if 't' in json_doc and 'c' in json_doc:
+                        self.from_string = False
+                        self._profile_doc = json_doc
+                        self._json_log = True
+                        self._parse_json_log()
+                        return
+                except (json.JSONDecodeError, ValueError):
+                    pass
             # create from string, remove line breaks at end of _line_str
             self.from_string = True
             self._line_str = doc_or_str.rstrip()
             self._profile_doc = None
+            self._json_log = False
             self._reset()
         else:
             self.from_string = False
             self._profile_doc = doc_or_str
+            self._json_log = False
             # docs don't need to be parsed lazily, they are fast
             self._parse_document()
 
@@ -1202,4 +1218,164 @@ class LogEvent(object):
                                               namespace=self.namespace,
                                               payload=payload, scanned=scanned,
                                               yields=yields, locks=locks,
+                                              duration=duration))
+
+    def _parse_json_log(self):
+        """Parse MongoDB JSON log entry, copy all values to member variables."""
+        self._reset()
+
+        doc = self._profile_doc
+        attr = doc.get('attr', {})
+
+        self._split_tokens_calculated = True
+        self._split_tokens = None
+
+        # Extract datetime from "t" field
+        # Format: {"$date": "2025-12-11T15:47:03.240+09:00"}
+        self._datetime_calculated = True
+        t_field = doc.get('t', {})
+        if isinstance(t_field, dict) and '$date' in t_field:
+            try:
+                self._datetime = dateutil.parser.parse(t_field['$date'])
+                if self._datetime.tzinfo is None:
+                    self._datetime = self._datetime.replace(tzinfo=tzutc())
+            except (ValueError, TypeError):
+                self._datetime = None
+        else:
+            self._datetime = None
+        self._datetime_format = 'iso8601-local'
+        self._reformat_timestamp('iso8601-local', force=True)
+
+        # Extract thread from "ctx" field
+        self._thread_calculated = True
+        self._thread = doc.get('ctx')
+        if self._thread and self._thread.startswith('conn'):
+            self._conn = self._thread
+
+        # Extract level from "s" field
+        self._level_calculated = True
+        self._level = doc.get('s')
+        self._component = doc.get('c')
+
+        # Extract operation and namespace from attr
+        self._operation_calculated = True
+        op_type = attr.get('type', '').lower()
+        if op_type in self.log_operations:
+            self._operation = op_type
+        else:
+            # Check if command field exists in attr
+            command = attr.get('command', {})
+            if isinstance(command, dict) and command:
+                # Determine operation from command type
+                first_key = next(iter(command.keys()), None)
+                if first_key:
+                    if first_key in ['find', 'count', 'distinct', 'aggregate']:
+                        self._operation = 'command'
+                    elif first_key in ['insert', 'update', 'delete']:
+                        self._operation = first_key
+            elif op_type:
+                self._operation = op_type
+
+        self._namespace = attr.get('ns')
+
+        # Extract command type for command operations
+        self._command_calculated = True
+        command = attr.get('command', {})
+        if isinstance(command, dict) and self._operation == 'command':
+            first_key = next(iter(command.keys()), None)
+            if first_key and first_key not in ['$db', 'lsid', '$clusterTime']:
+                self._command = first_key.lower()
+
+        # Extract duration from "durationMillis" in attr
+        self._duration_calculated = True
+        self._duration = attr.get('durationMillis')
+
+        # Extract counters from attr
+        self._counters_calculated = True
+
+        # Counter mappings from JSON field names to internal names
+        # (JSON name -> internal attribute name)
+        self._nscanned = attr.get('keysExamined')
+        self._nscannedObjects = attr.get('docsExamined')
+        self._ntoreturn = attr.get('ntoreturn')
+        self._nreturned = attr.get('nreturned') or attr.get('nMatched')
+        self._ninserted = attr.get('ninserted') or attr.get('nInserted')
+        self._nupdated = attr.get('nupdated') or attr.get('nModified')
+        self._ndeleted = attr.get('ndeleted') or attr.get('nDeleted')
+        self._numYields = attr.get('numYields')
+        self._planSummary = attr.get('planSummary')
+        self._actualPlanSummary = attr.get('planSummary')
+        self._writeConflicts = attr.get('writeConflicts')
+
+        # Lock stats - try to extract r and w values
+        locks = attr.get('locks', {})
+        if locks:
+            self._locks = json.dumps(locks)
+            # Try to find read/write lock times if available
+            for lock_type in ['Global', 'Database', 'Collection']:
+                if lock_type in locks:
+                    lock_data = locks[lock_type]
+                    if 'acquireCount' in lock_data:
+                        if 'r' in lock_data['acquireCount']:
+                            self._r = lock_data['acquireCount']['r']
+                        if 'w' in lock_data['acquireCount']:
+                            self._w = lock_data['acquireCount']['w']
+                    break
+
+        # Additional counters
+        self._bytesRead = attr.get('bytesRead')
+        self._bytesWritten = attr.get('bytesWritten')
+        self._timeReadingMicros = attr.get('timeReadingMicros')
+        self._timeWritingMicros = attr.get('timeWritingMicros')
+
+        # Transaction related
+        self._txnNumber = attr.get('txnNumber')
+        lsid = attr.get('lsid')
+        if lsid:
+            self._lsid = json.dumps(lsid) if isinstance(lsid, dict) else str(lsid)
+        self._autocommit = attr.get('autocommit')
+
+        # Read concern
+        read_concern = attr.get('readConcern', {})
+        if isinstance(read_concern, dict):
+            self._readConcern = read_concern.get('level')
+
+        self._timeActiveMicros = attr.get('timeActiveMicros')
+        self._timeInactiveMicros = attr.get('timeInactiveMicros')
+        self._readTimestamp = attr.get('readTimestamp')
+        self._terminationCause = attr.get('terminationCause')
+
+        # Extract pattern from command/query
+        if 'command' in attr:
+            command = attr['command']
+            if isinstance(command, dict):
+                # Try to extract filter/query pattern
+                filter_doc = command.get('filter') or command.get('query') or command.get('q')
+                if filter_doc:
+                    self._pattern = json2pattern(json.dumps(filter_doc), debug=self._debug)
+                    self._actual_query = json.dumps(filter_doc)
+
+                # Extract sort pattern
+                sort_doc = command.get('sort') or command.get('orderby')
+                if sort_doc:
+                    self._sort_pattern = json2pattern(json.dumps(sort_doc), debug=self._debug)
+                    self._actual_sort = json.dumps(sort_doc)
+
+        # Build a line_str representation for display purposes
+        payload = ''
+        if 'command' in attr:
+            payload = 'command: %s' % json.dumps(attr['command'], ensure_ascii=False)
+
+        scanned = 'keysExamined:%i' % self._nscanned if self._nscanned is not None else ''
+        yields = 'numYields:%i' % self._numYields if self._numYields is not None else ''
+        duration = '%ims' % self._duration if self._duration is not None else ''
+        locks_str = self._locks if self._locks else ''
+
+        self._line_str = ("[{thread}] {operation} {namespace} {payload} "
+                          "{scanned} {yields} locks {locks} "
+                          "{duration}".format(thread=self._thread or '',
+                                              operation=self._operation or '',
+                                              namespace=self._namespace or '',
+                                              payload=payload, scanned=scanned,
+                                              yields=yields, locks=locks_str,
                                               duration=duration))
